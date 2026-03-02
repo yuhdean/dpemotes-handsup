@@ -16,11 +16,304 @@ local PtfxNotif = false
 local PtfxPrompt = false
 local PtfxWait = 500
 local PtfxNoProp = false
+local DroppedWeaponObjects = {}
+local DroppedWeaponTargetDistance = 1.5
+local DroppedWeaponTargetZoneRadius = 1.0
+local GunGroups = {
+  [GetHashKey('GROUP_PISTOL')] = true,
+  [GetHashKey('GROUP_SMG')] = true,
+  [GetHashKey('GROUP_RIFLE')] = true,
+  [GetHashKey('GROUP_MG')] = true,
+  [GetHashKey('GROUP_SHOTGUN')] = true,
+  [GetHashKey('GROUP_SNIPER')] = true,
+  [GetHashKey('GROUP_HEAVY')] = true,
+}
+
+local function IsHoldingGun()
+		local weapon = GetSelectedPedWeapon(PlayerPedId())
+		if not weapon or weapon == GetHashKey('WEAPON_UNARMED') then
+			return false
+		end
+	
+	  return GunGroups[GetWeapontypeGroup(weapon)] == true
+end
+
+local function LoadModelHash(modelHash)
+  while not HasModelLoaded(modelHash) do
+    RequestModel(modelHash)
+    Wait(10)
+  end
+end
+
+local function GetDroppedWeaponClipAmmo(playerPed, weaponHash, ammoCount)
+  if not ammoCount or ammoCount <= 0 then
+    return 0
+  end
+
+  local _, maxClipAmmo = GetMaxAmmoInClip(playerPed, weaponHash, true)
+
+  if maxClipAmmo and maxClipAmmo > 0 then
+    return math.min(ammoCount, maxClipAmmo)
+  end
+
+  return ammoCount
+end
+
+local function RemoveDroppedWeaponTarget(dropData)
+  if not dropData then
+    return
+  end
+
+  if dropData.entity and dropData.targetName then
+    exports.ox_target:removeLocalEntity(dropData.entity, dropData.targetName)
+  end
+
+  if dropData.zoneId then
+    exports.ox_target:removeZone(dropData.zoneId, true)
+    dropData.zoneId = nil
+  end
+end
+
+local function RemoveDroppedWeaponEntry(dropId, shouldDeleteEntity)
+  local dropData = DroppedWeaponObjects[dropId]
+
+  if not dropData then
+    return
+  end
+
+  RemoveDroppedWeaponTarget(dropData)
+
+  if shouldDeleteEntity and dropData.entity and DoesEntityExist(dropData.entity) then
+    DeleteEntity(dropData.entity)
+  end
+
+  DroppedWeaponObjects[dropId] = nil
+end
+
+local function RegisterDroppedWeaponPickup(dropId, dropData)
+  dropData.targetName = ('dpemotes_pickup_%s'):format(dropId)
+
+  if dropData.entity and DoesEntityExist(dropData.entity) then
+    exports.ox_target:addLocalEntity(dropData.entity, {
+      {
+        name = dropData.targetName,
+        icon = 'fa-solid fa-gun',
+        label = 'Pick Up Weapon',
+        distance = DroppedWeaponTargetDistance,
+        onSelect = function()
+          TriggerServerEvent('dp:pickupDroppedWeapon', dropId)
+        end
+      }
+    })
+  end
+
+  local targetCoords = dropData.coords
+
+  if dropData.entity and DoesEntityExist(dropData.entity) then
+    local entityCoords = GetEntityCoords(dropData.entity)
+    targetCoords = {
+      x = entityCoords.x,
+      y = entityCoords.y,
+      z = entityCoords.z
+    }
+    dropData.coords = targetCoords
+  end
+
+  if dropData.zoneId then
+    exports.ox_target:removeZone(dropData.zoneId, true)
+  end
+
+  dropData.zoneId = exports.ox_target:addSphereZone({
+    coords = vec3(targetCoords.x, targetCoords.y, targetCoords.z),
+    radius = DroppedWeaponTargetZoneRadius,
+    debug = false,
+    options = {
+      {
+        name = ('%s_zone'):format(dropData.targetName),
+        icon = 'fa-solid fa-gun',
+        label = 'Pick Up Weapon',
+        distance = DroppedWeaponTargetDistance,
+        onSelect = function()
+          TriggerServerEvent('dp:pickupDroppedWeapon', dropId)
+        end
+      }
+    }
+  })
+end
+
+local function TrackDroppedWeaponTarget(dropId, dropData)
+  if dropData.trackingTarget then
+    return
+  end
+
+  dropData.trackingTarget = true
+
+  CreateThread(function()
+    local lastCoords
+
+    while DroppedWeaponObjects[dropId] == dropData do
+      if not dropData.entity or not DoesEntityExist(dropData.entity) then
+        break
+      end
+
+      local entityCoords = GetEntityCoords(dropData.entity)
+
+      if not lastCoords or #(vec3(entityCoords.x, entityCoords.y, entityCoords.z) - vec3(lastCoords.x, lastCoords.y, lastCoords.z)) > 0.1 then
+        dropData.coords = {
+          x = entityCoords.x,
+          y = entityCoords.y,
+          z = entityCoords.z
+        }
+        RegisterDroppedWeaponPickup(dropId, dropData)
+        lastCoords = dropData.coords
+      end
+
+      Wait(150)
+    end
+
+    dropData.trackingTarget = nil
+  end)
+end
+
+local function SpawnDroppedWeaponObject(dropId, dropData)
+  if not dropData.weaponModel or dropData.weaponModel == 0 then
+    RegisterDroppedWeaponPickup(dropId, dropData)
+    return
+  end
+
+  LoadModelHash(dropData.weaponModel)
+
+  local weaponObject = CreateObjectNoOffset(
+    dropData.weaponModel,
+    dropData.spawnCoords.x,
+    dropData.spawnCoords.y,
+    dropData.spawnCoords.z,
+    false,
+    false,
+    false
+  )
+
+  if weaponObject and weaponObject ~= 0 then
+    dropData.entity = weaponObject
+    SetEntityHeading(weaponObject, dropData.heading + 90.0)
+    SetEntityCollision(weaponObject, true, true)
+    SetEntityDynamic(weaponObject, true)
+    SetEntityHasGravity(weaponObject, true)
+    ActivatePhysics(weaponObject)
+    ApplyForceToEntity(
+      weaponObject,
+      1,
+      dropData.force.x,
+      dropData.force.y,
+      dropData.force.z,
+      0.0,
+      0.0,
+      0.0,
+      0,
+      false,
+      true,
+      true,
+      false,
+      true
+    )
+    SetModelAsNoLongerNeeded(dropData.weaponModel)
+    RegisterDroppedWeaponPickup(dropId, dropData)
+    TrackDroppedWeaponTarget(dropId, dropData)
+
+    CreateThread(function()
+      Wait(1500)
+
+      if not DroppedWeaponObjects[dropId] or not DoesEntityExist(weaponObject) then
+        return
+      end
+
+      local landedCoords = GetEntityCoords(weaponObject)
+      dropData.coords = {
+        x = landedCoords.x,
+        y = landedCoords.y,
+        z = landedCoords.z
+      }
+
+      RegisterDroppedWeaponPickup(dropId, dropData)
+    end)
+  else
+    RegisterDroppedWeaponPickup(dropId, dropData)
+  end
+end
+
+local function DropHeldGunToGround()
+  local playerPed = PlayerPedId()
+  local weaponHash = GetSelectedPedWeapon(playerPed)
+
+  if not weaponHash or weaponHash == GetHashKey('WEAPON_UNARMED') then
+    return false
+  end
+
+  local ammoCount = GetAmmoInPedWeapon(playerPed, weaponHash)
+  local clipAmmo = GetDroppedWeaponClipAmmo(playerPed, weaponHash, ammoCount)
+
+  local weaponModel = GetWeapontypeModel(weaponHash)
+
+  local handCoords = GetPedBoneCoords(playerPed, 57005, 0.16, 0.03, 0.02)
+  local forwardVector = GetEntityForwardVector(playerPed)
+  local dropPayload = {
+    weaponHash = weaponHash,
+    weaponModel = weaponModel,
+    ammo = ammoCount,
+    clipAmmo = clipAmmo,
+    spawnCoords = {
+      x = handCoords.x,
+      y = handCoords.y,
+      z = handCoords.z
+    },
+    coords = {
+      x = handCoords.x,
+      y = handCoords.y,
+      z = handCoords.z
+    },
+    heading = GetEntityHeading(playerPed),
+    force = {
+      x = forwardVector.x * 0.55,
+      y = forwardVector.y * 0.55,
+      z = -0.15
+    }
+  }
+
+  SetCurrentPedWeapon(playerPed, GetHashKey('WEAPON_UNARMED'), true)
+  RemoveWeaponFromPed(playerPed, weaponHash)
+  TriggerServerEvent('dp:createDroppedWeapon', dropPayload)
+
+  lib.notify({
+    title = 'Dropped Gun',
+    description = "You dropped your weapon on the ground.",
+    type = 'inform',
+    position = 'center-right'
+  })
+
+  return true
+end
+
+local function ToggleHandsUpEmote()
+  if IsPedSittingInAnyVehicle(PlayerPedId()) then
+    return
+  end
+
+  if IsInAnimation and ChosenDict == 'missminuteman_1ig_2' and ChosenAnimation == 'handsup_base' then
+    EmoteCancel()
+    return
+  end
+
+  EmoteCommandStart(nil, { 'handsup' })
+end
 
 Citizen.CreateThread(function()
   while true do
 
     if IsPedShooting(PlayerPedId()) and IsInAnimation then
+      EmoteCancel()
+    end
+
+    if IsInAnimation and IsHoldingGun() then
       EmoteCancel()
     end
 
@@ -70,10 +363,66 @@ RegisterCommand('emotemenu', function(source, args, raw) OpenEmoteMenu() end)
 RegisterCommand('emotes', function(source, args, raw) EmotesOnCommand() end)
 RegisterCommand('walk', function(source, args, raw) WalkCommandStart(source, args, raw) end)
 RegisterCommand('walks', function(source, args, raw) WalksOnCommand() end)
+RegisterCommand('+handsup', function()
+  ToggleHandsUpEmote()
+end, false)
+RegisterCommand('-handsup', function()
+end, false)
+RegisterKeyMapping('+handsup', 'Toggle hands up emote', 'keyboard', 'X')
+
+RegisterNetEvent('dp:registerDroppedWeapon')
+AddEventHandler('dp:registerDroppedWeapon', function(dropId, dropData)
+  RemoveDroppedWeaponEntry(dropId, true)
+
+  DroppedWeaponObjects[dropId] = dropData
+  SpawnDroppedWeaponObject(dropId, dropData)
+end)
+
+RegisterNetEvent('dp:removeDroppedWeapon')
+AddEventHandler('dp:removeDroppedWeapon', function(dropId)
+  RemoveDroppedWeaponEntry(dropId, true)
+end)
+
+RegisterNetEvent('dp:syncDroppedWeapons')
+AddEventHandler('dp:syncDroppedWeapons', function(drops)
+  for dropId, dropData in pairs(drops) do
+    if not DroppedWeaponObjects[dropId] then
+      DroppedWeaponObjects[dropId] = dropData
+      SpawnDroppedWeaponObject(dropId, dropData)
+    end
+  end
+end)
+
+RegisterNetEvent('dp:giveDroppedWeapon')
+AddEventHandler('dp:giveDroppedWeapon', function(weaponHash, ammo, clipAmmo)
+  local playerPed = PlayerPedId()
+
+  GiveWeaponToPed(playerPed, weaponHash, ammo or 0, false, true)
+  SetPedAmmo(playerPed, weaponHash, ammo or 0)
+
+  if clipAmmo and clipAmmo > 0 then
+    SetAmmoInClip(playerPed, weaponHash, clipAmmo)
+  end
+
+  lib.notify({
+    title = 'Picked Up Gun',
+    description = 'You picked the weapon up.',
+    type = 'success',
+    position = 'center-right'
+  })
+end)
+
+CreateThread(function()
+  Wait(1500)
+  TriggerServerEvent('dp:requestDroppedWeapons')
+end)
 
 AddEventHandler('onResourceStop', function(resource)
   if resource == GetCurrentResourceName() then
     DestroyAllProps()
+    for dropId in pairs(DroppedWeaponObjects) do
+      RemoveDroppedWeaponEntry(dropId, true)
+    end
     ClearPedTasksImmediately(GetPlayerPed(-1))
     ResetPedMovementClipset(PlayerPedId())
   end
@@ -297,7 +646,9 @@ function OnEmotePlay(EmoteName)
     return false
   end
 
-  if Config.DisarmPlayer then
+  if string.lower(ename or '') == 'hands up' and IsHoldingGun() then
+    DropHeldGunToGround()
+  elseif Config.DisarmPlayer then
     if IsPedArmed(GetPlayerPed(-1), 7) then
       SetCurrentPedWeapon(GetPlayerPed(-1), GetHashKey('WEAPON_UNARMED'), true)
     end
