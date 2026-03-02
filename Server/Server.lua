@@ -14,6 +14,107 @@ AddEventHandler("ServerValidEmote", function(target, requestedemote, otheremote)
 	TriggerClientEvent("SyncPlayEmoteSource", target, requestedemote)
 end)
 
+local DroppedWeapons = {}
+local NextDroppedWeaponId = 0
+local DroppedWeaponLifetimeMs = 120000
+local DroppedWeaponDespawnRadius = 75.0
+
+local function removeDroppedWeapon(dropId)
+	if not DroppedWeapons[dropId] then
+		return
+	end
+
+	DroppedWeapons[dropId] = nil
+	TriggerClientEvent('dp:removeDroppedWeapon', -1, dropId)
+end
+
+local function isAnyPlayerNearDrop(dropData)
+	for _, playerId in ipairs(GetPlayers()) do
+		local ped = GetPlayerPed(playerId)
+
+		if ped and ped ~= 0 then
+			local coords = GetEntityCoords(ped)
+			local dx = coords.x - dropData.coords.x
+			local dy = coords.y - dropData.coords.y
+			local dz = coords.z - dropData.coords.z
+			local distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+
+			if distance <= DroppedWeaponDespawnRadius then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+RegisterNetEvent('dp:createDroppedWeapon')
+AddEventHandler('dp:createDroppedWeapon', function(dropData)
+	if type(dropData) ~= 'table' then
+		return
+	end
+
+	NextDroppedWeaponId = NextDroppedWeaponId + 1
+
+	local dropId = NextDroppedWeaponId
+	local storedDrop = {
+		weaponHash = dropData.weaponHash,
+		weaponModel = dropData.weaponModel,
+		ammo = dropData.ammo or 0,
+		clipAmmo = dropData.clipAmmo or 0,
+		spawnCoords = dropData.spawnCoords,
+		coords = dropData.coords,
+		heading = dropData.heading or 0.0,
+		force = dropData.force or { x = 0.0, y = 0.0, z = 0.0 },
+		createdAt = os.time()
+	}
+
+	if type(storedDrop.coords) ~= 'table' or type(storedDrop.spawnCoords) ~= 'table' then
+		return
+	end
+
+	DroppedWeapons[dropId] = storedDrop
+	TriggerClientEvent('dp:registerDroppedWeapon', -1, dropId, storedDrop)
+
+	SetTimeout(DroppedWeaponLifetimeMs, function()
+		removeDroppedWeapon(dropId)
+	end)
+end)
+
+RegisterNetEvent('dp:pickupDroppedWeapon')
+AddEventHandler('dp:pickupDroppedWeapon', function(dropId)
+	local src = source
+	local dropData = DroppedWeapons[dropId]
+
+	if not dropData then
+		return
+	end
+
+	removeDroppedWeapon(dropId)
+	TriggerClientEvent('dp:giveDroppedWeapon', src, dropData.weaponHash, dropData.ammo or 0, dropData.clipAmmo or 0)
+end)
+
+RegisterNetEvent('dp:requestDroppedWeapons')
+AddEventHandler('dp:requestDroppedWeapons', function()
+	local src = source
+
+	if next(DroppedWeapons) then
+		TriggerClientEvent('dp:syncDroppedWeapons', src, DroppedWeapons)
+	end
+end)
+
+CreateThread(function()
+	while true do
+		Wait(10000)
+
+		for dropId, dropData in pairs(DroppedWeapons) do
+			if not isAnyPlayerNearDrop(dropData) then
+				removeDroppedWeapon(dropId)
+			end
+		end
+	end
+end)
+
 -----------------------------------------------------------------------------------------------------
 -- Keybinding  --------------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------------------------
